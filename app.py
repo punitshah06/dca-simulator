@@ -5,7 +5,7 @@ from datetime import timedelta
 st.set_page_config(page_title="Investment Toolkit", layout="wide")
 
 # ── Page selector ─────────────────────────────────────────────────────────────
-page = st.sidebar.radio("Navigate", ["DCA Simulator", "Financial Risk Scorer"])
+page = st.sidebar.radio("Navigate", ["DCA Simulator", "Stock Risk Scorer", "ETF Risk Scorer"])
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
 
@@ -527,9 +527,349 @@ H2: =GOOGLEFINANCE(A2, "price")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
+#  PAGE 3 — ETF RISK SCORER  (Google Finance KPIs only — no PE/EPS/Beta)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+#  ETFs return #N/A for pe, eps, beta, marketcap in GOOGLEFINANCE.
+#  Available: price, high52, low52, volumeavg, changepct
+#
+#  5 scoring dimensions (20 pts each → 100 total):
+#    1. Price Strength   — position in 52-week range (reuses stock scorer fn)
+#    2. Range Tightness  — (high52-low52)/high52 — tighter = less volatile
+#    3. Liquidity        — average daily volume
+#    4. Daily Volatility — |changepct| as volatility proxy
+#    5. Price Level      — higher price = more established ETF
+# ──────────────────────────────────────────────────────────────────────────────
+
+def score_range_tightness(high52: float, low52: float) -> int:
+    """Score how tight the 52-week range is (0-20). Tighter = safer."""
+    if high52 <= 0:
+        return 0
+    spread = (high52 - low52) / high52 * 100  # as percentage
+    if spread < 15:
+        return 20
+    elif spread < 25:
+        return 16
+    elif spread < 35:
+        return 12
+    elif spread < 50:
+        return 8
+    else:
+        return 4
+
+
+def score_liquidity_vol(volume_avg: float) -> int:
+    """Score average daily volume (0-20). Higher = more liquid."""
+    if volume_avg > 10e6:
+        return 20
+    elif volume_avg > 5e6:
+        return 18
+    elif volume_avg > 1e6:
+        return 15
+    elif volume_avg > 500e3:
+        return 10
+    elif volume_avg > 100e3:
+        return 5
+    else:
+        return 2
+
+
+def score_daily_volatility(change_pct: float) -> int:
+    """Score absolute daily % change (0-20). Lower = less volatile."""
+    abs_chg = abs(change_pct)
+    if abs_chg < 0.5:
+        return 20
+    elif abs_chg < 1.0:
+        return 16
+    elif abs_chg < 1.5:
+        return 12
+    elif abs_chg < 2.5:
+        return 8
+    elif abs_chg < 4.0:
+        return 4
+    else:
+        return 0
+
+
+def score_price_level(price: float) -> int:
+    """Score share price (0-20). Higher price = more established ETF."""
+    if price > 200:
+        return 20
+    elif price > 100:
+        return 18
+    elif price > 50:
+        return 15
+    elif price > 20:
+        return 10
+    elif price > 5:
+        return 5
+    else:
+        return 2
+
+
+# ── ETF Orchestrator ──────────────────────────────────────────────────────────
+
+ETF_REQUIRED_COLS = ["Price", "High52", "Low52", "VolumeAvg", "ChangePct"]
+
+
+def compute_etf_risk_scores(df: pd.DataFrame) -> pd.DataFrame:
+    """Compute ETF risk scores for each row."""
+    records = []
+    for _, row in df.iterrows():
+        ps = score_price_strength(row["Price"], row["High52"], row["Low52"])
+        rt = score_range_tightness(row["High52"], row["Low52"])
+        liq = score_liquidity_vol(row["VolumeAvg"])
+        dv = score_daily_volatility(row["ChangePct"])
+        pl = score_price_level(row["Price"])
+
+        composite = ps + rt + liq + dv + pl
+
+        if composite >= 80:
+            risk_label = "Low Risk"
+        elif composite >= 60:
+            risk_label = "Moderate Risk"
+        elif composite >= 40:
+            risk_label = "Elevated Risk"
+        else:
+            risk_label = "High Risk"
+
+        identifier = row.get("ETF", row.get("Ticker", "Unknown"))
+        records.append({
+            "ETF": identifier,
+            "Price Strength (0-20)": ps,
+            "Range Tightness (0-20)": rt,
+            "Liquidity (0-20)": liq,
+            "Daily Volatility (0-20)": dv,
+            "Price Level (0-20)": pl,
+            "Composite (0-100)": composite,
+            "Risk Rating": risk_label,
+        })
+    return pd.DataFrame(records)
+
+
+# ── ETF Risk Scorer UI ───────────────────────────────────────────────────────
+
+def run_etf_scorer():
+    st.title("ETF Risk Scorer")
+
+    st.sidebar.header("ETF Scorer Settings")
+    uploaded = st.sidebar.file_uploader(
+        "Upload ETF KPIs CSV", type=["csv"], key="etf_csv"
+    )
+
+    if uploaded is None:
+        st.info(
+            "Upload a CSV with one row per ETF. **All columns come directly "
+            "from** `=GOOGLEFINANCE()` **in Google Sheets** — works for ETFs "
+            "where PE, EPS, and Beta are not available."
+        )
+
+        st.subheader("Required CSV Columns")
+        st.markdown("""
+| Column | Google Sheets Formula | Example |
+|--------|----------------------|---------|
+| `ETF` | *(type the ticker)* | SPY |
+| `Price` | `=GOOGLEFINANCE("SPY","price")` | 502.12 |
+| `High52` | `=GOOGLEFINANCE("SPY","high52")` | 524.61 |
+| `Low52` | `=GOOGLEFINANCE("SPY","low52")` | 410.34 |
+| `VolumeAvg` | `=GOOGLEFINANCE("SPY","volumeavg")` | 78000000 |
+| `ChangePct` | `=GOOGLEFINANCE("SPY","changepct")` | 0.35 |
+        """)
+
+        st.markdown("---")
+        st.subheader("Google Sheets Setup")
+        st.markdown("""
+**Step 1** — Create a sheet with this layout:
+
+| | A | B | C | D | E | F |
+|---|---|---|---|---|---|---|
+| **1** | ETF | Price | High52 | Low52 | VolumeAvg | ChangePct |
+| **2** | SPY | *formula* | *formula* | *formula* | *formula* | *formula* |
+
+**Step 2** — In row 2, enter formulas (replace `A2` with the ticker cell):
+
+```
+B2: =GOOGLEFINANCE(A2, "price")
+C2: =GOOGLEFINANCE(A2, "high52")
+D2: =GOOGLEFINANCE(A2, "low52")
+E2: =GOOGLEFINANCE(A2, "volumeavg")
+F2: =GOOGLEFINANCE(A2, "changepct")
+```
+
+**Step 3** — Copy row 2 down for each ETF. Then **File → Download → CSV**.
+        """)
+
+        # Downloadable sample CSV
+        sample = pd.DataFrame({
+            "ETF": ["SPY", "QQQ", "VTI", "ARKK", "GLD", "TLT"],
+            "Price": [502.12, 431.50, 246.30, 49.25, 189.45, 92.10],
+            "High52": [524.61, 458.73, 258.18, 55.20, 195.30, 101.50],
+            "Low52": [410.34, 340.88, 202.12, 37.10, 168.20, 82.40],
+            "VolumeAvg": [78000000, 48000000, 3500000, 8500000, 9200000, 21000000],
+            "ChangePct": [0.35, 0.52, 0.31, 1.45, 0.18, 0.65],
+        })
+        st.download_button(
+            "Download sample CSV",
+            sample.to_csv(index=False),
+            "sample_etf_kpis.csv",
+            "text/csv",
+        )
+
+        st.markdown("---")
+        st.subheader("Scoring Methodology")
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("""
+**Price Strength (0-20 pts)** — Position in 52-week range
+| % of Range | Score |
+|------------|-------|
+| 80–100% (near high) | 20 |
+| 60–80% | 16 |
+| 40–60% | 12 |
+| 20–40% | 8 |
+| 0–20% (near low) | 4 |
+
+**Liquidity (0-20 pts)** — Average Daily Volume
+| Volume | Score |
+|--------|-------|
+| > 10M | 20 |
+| 5–10M | 18 |
+| 1–5M | 15 |
+| 500K–1M | 10 |
+| 100–500K | 5 |
+| < 100K | 2 |
+            """)
+        with col2:
+            st.markdown("""
+**52-Week Range Tightness (0-20 pts)**
+| Spread | Score |
+|--------|-------|
+| < 15% | 20 |
+| 15–25% | 16 |
+| 25–35% | 12 |
+| 35–50% | 8 |
+| > 50% | 4 |
+
+**Daily Volatility (0-20 pts)** — |Daily % Change|
+| Change | Score |
+|--------|-------|
+| < 0.5% | 20 |
+| 0.5–1% | 16 |
+| 1–1.5% | 12 |
+| 1.5–2.5% | 8 |
+| 2.5–4% | 4 |
+| > 4% | 0 |
+            """)
+        st.markdown("""
+**Price Level (0-20 pts)** — Share Price
+| Price | Score |
+|-------|-------|
+| > $200 | 20 |
+| $100–200 | 18 |
+| $50–100 | 15 |
+| $20–50 | 10 |
+| $5–20 | 5 |
+| < $5 | 2 |
+
+---
+**Composite Risk Score = Sum of 5 scores (0–100)**
+
+| Score | Rating |
+|-------|--------|
+| 80–100 | Low Risk |
+| 60–79 | Moderate Risk |
+| 40–59 | Elevated Risk |
+| 0–39 | High Risk |
+        """)
+        st.stop()
+
+    # ── Load & validate CSV ───────────────────────────────────────────────────
+    raw = pd.read_csv(uploaded)
+    raw.columns = [c.strip() for c in raw.columns]
+
+    has_id = "ETF" in raw.columns or "Ticker" in raw.columns
+    if not has_id:
+        st.error("CSV must have an **ETF** or **Ticker** column.")
+        st.stop()
+
+    missing = [c for c in ETF_REQUIRED_COLS if c not in raw.columns]
+    if missing:
+        st.error(f"Missing columns: **{', '.join(missing)}**")
+        st.stop()
+
+    for col in ETF_REQUIRED_COLS:
+        raw[col] = pd.to_numeric(raw[col], errors="coerce")
+    raw = raw.dropna(subset=ETF_REQUIRED_COLS)
+
+    if len(raw) == 0:
+        st.warning("No valid rows after cleaning. Check your data.")
+        st.stop()
+
+    # ── Compute scores ────────────────────────────────────────────────────────
+    results_df = compute_etf_risk_scores(raw)
+    results_df = results_df.sort_values("Composite (0-100)", ascending=False).reset_index(drop=True)
+    st.subheader(f"ETF Risk Assessment — {len(results_df)} ETFs (sorted lowest → highest risk)")
+
+    # ── 1. Breakdown table with color-coded risk ──────────────────────────────
+    def color_risk(val):
+        colors = {
+            "Low Risk": "background-color: #c6efce; color: #006100",
+            "Moderate Risk": "background-color: #ffeb9c; color: #9c6500",
+            "Elevated Risk": "background-color: #ffc7ce; color: #9c0006",
+            "High Risk": "background-color: #ff9999; color: #800000",
+        }
+        return colors.get(val, "")
+
+    st.dataframe(
+        results_df.style.applymap(color_risk, subset=["Risk Rating"]),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # Best / worst summary
+    best = results_df.loc[results_df["Composite (0-100)"].idxmax()]
+    worst = results_df.loc[results_df["Composite (0-100)"].idxmin()]
+    col1, col2 = st.columns(2)
+    with col1:
+        st.success(f"Lowest risk: **{best['ETF']}** — {best['Composite (0-100)']}/100 ({best['Risk Rating']})")
+    with col2:
+        st.error(f"Highest risk: **{worst['ETF']}** — {worst['Composite (0-100)']}/100 ({worst['Risk Rating']})")
+
+    # ── 2. Composite score bar chart ──────────────────────────────────────────
+    st.subheader("Composite Risk Scores")
+    chart_data = results_df.set_index("ETF")[["Composite (0-100)"]]
+    st.bar_chart(chart_data)
+
+    # ── 3. Score composition stacked bar ──────────────────────────────────────
+    st.subheader("Score Breakdown by ETF")
+    etf_sub_cols = ["Price Strength (0-20)", "Range Tightness (0-20)",
+                    "Liquidity (0-20)", "Daily Volatility (0-20)", "Price Level (0-20)"]
+    composition_df = results_df.set_index("ETF")[etf_sub_cols]
+    st.bar_chart(composition_df)
+
+    # ── 4. Per-ETF detail expanders ───────────────────────────────────────────
+    st.subheader("Detailed Breakdown")
+    for _, row in results_df.iterrows():
+        with st.expander(f"{row['ETF']} — {row['Risk Rating']} ({row['Composite (0-100)']}/100)"):
+            c1, c2, c3, c4, c5 = st.columns(5)
+            with c1:
+                st.metric("Price Strength", f"{row['Price Strength (0-20)']}/20")
+            with c2:
+                st.metric("Range Tightness", f"{row['Range Tightness (0-20)']}/20")
+            with c3:
+                st.metric("Liquidity", f"{row['Liquidity (0-20)']}/20")
+            with c4:
+                st.metric("Daily Volatility", f"{row['Daily Volatility (0-20)']}/20")
+            with c5:
+                st.metric("Price Level", f"{row['Price Level (0-20)']}/20")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
 #  DISPATCH
 # ══════════════════════════════════════════════════════════════════════════════
 if page == "DCA Simulator":
     run_dca_simulator()
-elif page == "Financial Risk Scorer":
+elif page == "Stock Risk Scorer":
     run_risk_scorer()
+elif page == "ETF Risk Scorer":
+    run_etf_scorer()

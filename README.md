@@ -1,9 +1,10 @@
 # Investment Toolkit
 
-A Streamlit app with two tools for retail investors:
+A Streamlit app with three tools for retail investors:
 
 1. **DCA Simulator** — Compare dollar-cost averaging strategies (daily vs each weekday) using historical stock price data
-2. **Stock Risk Scorer** — Score and rank stocks on a 0-100 risk scale using KPIs from Google Finance
+2. **Stock Risk Scorer** — Score and rank individual stocks on a 0-100 risk scale using KPIs from Google Finance
+3. **ETF Risk Scorer** — Score and rank ETFs using price/volume KPIs (since PE, EPS, Beta are unavailable for ETFs)
 
 ## Setup
 
@@ -53,6 +54,33 @@ Copy row 2 down for each ticker, then File > Download > CSV.
 | Volatility | Beta | Beta < 0.5 |
 | Size / Stability | Market Cap | > $200B |
 | Price Strength | Position in 52-week range | Near 52-week high |
+
+**Risk ratings:** 80-100 Low Risk, 60-79 Moderate, 40-59 Elevated, 0-39 High Risk.
+
+Results are sorted from lowest to highest risk.
+
+## ETF Risk Scorer
+
+ETFs return `#N/A` for PE, EPS, Beta, and MarketCap in Google Finance. This scorer uses only price and volume data that GOOGLEFINANCE actually provides for ETFs.
+
+### Google Sheets setup
+
+| | A | B | C | D | E | F |
+|---|---|---|---|---|---|---|
+| **1** | ETF | Price | High52 | Low52 | VolumeAvg | ChangePct |
+| **2** | SPY | `=GOOGLEFINANCE(A2,"price")` | `=GOOGLEFINANCE(A2,"high52")` | `=GOOGLEFINANCE(A2,"low52")` | `=GOOGLEFINANCE(A2,"volumeavg")` | `=GOOGLEFINANCE(A2,"changepct")` |
+
+Copy row 2 down for each ETF, then File > Download > CSV.
+
+### Scoring (5 dimensions, 20 pts each, 100 total)
+
+| Dimension | KPI | Best score |
+|-----------|-----|------------|
+| Price Strength | Position in 52-week range | Near 52-week high |
+| Range Tightness | 52-week high-low spread % | < 15% spread |
+| Liquidity | Average daily volume | > 10M shares |
+| Daily Volatility | Absolute daily % change | < 0.5% |
+| Price Level | Share price | > $200 |
 
 **Risk ratings:** 80-100 Low Risk, 60-79 Moderate, 40-59 Elevated, 0-39 High Risk.
 
